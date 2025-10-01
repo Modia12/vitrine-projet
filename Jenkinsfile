@@ -1,11 +1,17 @@
 pipeline {
-    agent any
+    agent {
+        docker {
+            image 'node:20-alpine'
+            args '-u root:root'
+        }
+    }
     
     environment {
         DOCKER_IMAGE = 'spray-info'
         DOCKER_TAG = "${env.BUILD_NUMBER}"
-        DOCKER_REGISTRY = 'your-registry.com' // Modifier selon votre registre
-        NODE_VERSION = '20'
+        DOCKER_REGISTRY = 'docker.io' // Utiliser Docker Hub par défaut
+        HOME = "${WORKSPACE}"
+        npm_config_cache = "${WORKSPACE}/.npm"
     }
     
     stages {
@@ -22,7 +28,7 @@ pipeline {
                 sh '''
                     node --version
                     npm --version
-                    npm ci
+                    npm ci --prefer-offline --no-audit
                 '''
             }
         }
@@ -31,7 +37,7 @@ pipeline {
             steps {
                 echo 'Vérification du code...'
                 sh '''
-                    npm run lint || true
+                    npm run lint || echo "Lint warnings found"
                 '''
             }
         }
@@ -46,38 +52,52 @@ pipeline {
         }
         
         stage('Build Docker Image') {
+            agent any // Revenir à l'agent principal pour Docker
             steps {
                 echo 'Construction de l\'image Docker...'
                 script {
-                    docker.build("${DOCKER_IMAGE}:${DOCKER_TAG}")
+                    dockerImage = docker.build("${DOCKER_IMAGE}:${DOCKER_TAG}")
                     docker.build("${DOCKER_IMAGE}:latest")
                 }
             }
         }
         
         stage('Test Docker Image') {
+            agent any
             steps {
                 echo 'Test de l\'image Docker...'
-                sh '''
-                    docker run -d --name test-container -p 3001:3000 ${DOCKER_IMAGE}:${DOCKER_TAG}
-                    sleep 10
-                    curl -f http://localhost:3001 || exit 1
-                    docker stop test-container
-                    docker rm test-container
-                '''
+                script {
+                    try {
+                        sh """
+                            docker run -d --name test-container-${BUILD_NUMBER} -p 300${BUILD_NUMBER}:3000 ${DOCKER_IMAGE}:${DOCKER_TAG}
+                            sleep 15
+                            docker logs test-container-${BUILD_NUMBER}
+                            curl -f http://localhost:300${BUILD_NUMBER} || exit 1
+                        """
+                    } finally {
+                        sh """
+                            docker stop test-container-${BUILD_NUMBER} || true
+                            docker rm test-container-${BUILD_NUMBER} || true
+                        """
+                    }
+                }
             }
         }
         
         stage('Push to Registry') {
+            agent any
             when {
-                branch 'main'
+                anyOf {
+                    branch 'main'
+                    branch 'master'
+                }
             }
             steps {
                 echo 'Publication de l\'image Docker...'
                 script {
-                    docker.withRegistry("https://${DOCKER_REGISTRY}", 'docker-credentials') {
-                        docker.image("${DOCKER_IMAGE}:${DOCKER_TAG}").push()
-                        docker.image("${DOCKER_IMAGE}:latest").push()
+                    docker.withRegistry('https://registry.hub.docker.com', 'dockerhub-credentials') {
+                        dockerImage.push("${DOCKER_TAG}")
+                        dockerImage.push("latest")
                     }
                 }
             }
@@ -89,26 +109,34 @@ pipeline {
             }
             steps {
                 echo 'Déploiement en staging...'
-                sh '''
-                    # Commandes de déploiement staging
-                    # Exemple: kubectl apply -f k8s/staging/
-                    echo "Déploiement staging avec l'image ${DOCKER_IMAGE}:${DOCKER_TAG}"
-                '''
+                script {
+                    sh """
+                        echo "Déploiement staging avec l'image ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                        # docker-compose -f docker-compose.staging.yml up -d
+                    """
+                }
             }
         }
         
         stage('Deploy to Production') {
             when {
-                branch 'main'
+                anyOf {
+                    branch 'main'
+                    branch 'master'
+                }
             }
             steps {
                 echo 'Déploiement en production...'
-                input message: 'Déployer en production?', ok: 'Déployer'
-                sh '''
-                    # Commandes de déploiement production
-                    # Exemple: kubectl apply -f k8s/production/
-                    echo "Déploiement production avec l'image ${DOCKER_IMAGE}:${DOCKER_TAG}"
-                '''
+                timeout(time: 5, unit: 'MINUTES') {
+                    input message: 'Déployer en production?', ok: 'Déployer'
+                }
+                script {
+                    sh """
+                        echo "Déploiement production avec l'image ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                        # docker-compose -f docker-compose.prod.yml up -d
+                        # ou kubectl set image deployment/spray-info spray-info=${DOCKER_IMAGE}:${DOCKER_TAG}
+                    """
+                }
             }
         }
     }
@@ -119,12 +147,16 @@ pipeline {
             sh '''
                 docker system prune -f || true
             '''
+            cleanWs()
         }
         success {
-            echo 'Pipeline exécuté avec succès! ✅'
+            echo 'Pipeline exécuté avec succès!'
         }
         failure {
-            echo 'Le pipeline a échoué! ❌'
+            echo 'Le pipeline a échoué!'
+            // emailext subject: "Build Failed: ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
+            //          body: "Le build a échoué. Voir: ${env.BUILD_URL}",
+            //          to: "team@example.com"
         }
     }
 }
