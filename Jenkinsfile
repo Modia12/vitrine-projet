@@ -15,42 +15,140 @@ pipeline {
             }
         }
         
-        stage('Install Dependencies') {
-            agent {
-                docker {
-                    image 'node:20-alpine'
-                    reuseNode true
+        stage('Check Prerequisites') {
+            steps {
+                script {
+                    echo '🔍 Vérification des prérequis...'
+                    
+                    // Vérifier si Docker est disponible
+                    def dockerAvailable = sh(script: 'command -v docker', returnStatus: true) == 0
+                    env.DOCKER_AVAILABLE = dockerAvailable.toString()
+                    
+                    if (dockerAvailable) {
+                        echo '✅ Docker est disponible'
+                    } else {
+                        echo '⚠️ Docker n\'est pas disponible'
+                    }
+                    
+                    // Vérifier si Node.js est disponible
+                    def nodeAvailable = sh(script: 'command -v node', returnStatus: true) == 0
+                    env.NODE_AVAILABLE = nodeAvailable.toString()
+                    
+                    if (nodeAvailable) {
+                        def nodeVersion = sh(script: 'node --version', returnStdout: true).trim()
+                        echo "✅ Node.js est disponible: ${nodeVersion}"
+                    } else {
+                        echo '⚠️ Node.js n\'est pas disponible localement'
+                    }
                 }
             }
+        }
+        
+        stage('Install Dependencies') {
             steps {
-                echo '📥 Installation des dépendances...'
-                sh 'npm ci --prefer-offline --no-audit'
+                script {
+                    echo '📥 Installation des dépendances...'
+                    
+                    // Si Node.js est disponible localement, l'utiliser directement
+                    if (env.NODE_AVAILABLE == 'true') {
+                        echo '🟢 Utilisation de Node.js local'
+                        sh '''
+                            node --version
+                            npm --version
+                            npm ci --prefer-offline --no-audit || npm install
+                        '''
+                    }
+                    // Sinon, utiliser Docker si disponible
+                    else if (env.DOCKER_AVAILABLE == 'true') {
+                        echo '🐳 Utilisation de Docker avec Node.js'
+                        sh '''
+                            docker run --rm \
+                                -v "$(pwd)":/app \
+                                -w /app \
+                                node:20-alpine \
+                                sh -c "npm ci --prefer-offline --no-audit || npm install"
+                        '''
+                    }
+                    // Sinon, installer Node.js via nvm
+                    else {
+                        echo '📦 Installation de Node.js via nvm'
+                        sh '''
+                            # Installer nvm si nécessaire
+                            if [ ! -d "$HOME/.nvm" ]; then
+                                curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+                            fi
+                            
+                            # Charger nvm
+                            export NVM_DIR="$HOME/.nvm"
+                            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+                            
+                            # Installer et utiliser Node.js 20
+                            nvm install 20
+                            nvm use 20
+                            
+                            # Installer les dépendances
+                            npm ci --prefer-offline --no-audit || npm install
+                        '''
+                    }
+                    
+                    echo '✅ Dépendances installées avec succès'
+                }
             }
         }
         
         stage('Lint') {
-            agent {
-                docker {
-                    image 'node:20-alpine'
-                    reuseNode true
-                }
-            }
             steps {
-                echo '🔍 Vérification du code...'
-                sh 'npm run lint || echo "⚠️ Lint warnings trouvés"'
+                script {
+                    echo '🔍 Vérification du code...'
+                    
+                    if (env.NODE_AVAILABLE == 'true') {
+                        sh 'npm run lint || echo "⚠️ Lint warnings trouvés"'
+                    } else if (env.DOCKER_AVAILABLE == 'true') {
+                        sh '''
+                            docker run --rm \
+                                -v "$(pwd)":/app \
+                                -w /app \
+                                node:20-alpine \
+                                sh -c "npm run lint || echo '⚠️ Lint warnings trouvés'"
+                        '''
+                    } else {
+                        sh '''
+                            export NVM_DIR="$HOME/.nvm"
+                            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+                            nvm use 20
+                            npm run lint || echo "⚠️ Lint warnings trouvés"
+                        '''
+                    }
+                }
             }
         }
         
         stage('Build Application') {
-            agent {
-                docker {
-                    image 'node:20-alpine'
-                    reuseNode true
-                }
-            }
             steps {
-                echo '🏗️ Construction de l\'application...'
-                sh 'npm run build'
+                script {
+                    echo '🏗️ Construction de l\'application...'
+                    
+                    if (env.NODE_AVAILABLE == 'true') {
+                        sh 'npm run build'
+                    } else if (env.DOCKER_AVAILABLE == 'true') {
+                        sh '''
+                            docker run --rm \
+                                -v "$(pwd)":/app \
+                                -w /app \
+                                node:20-alpine \
+                                npm run build
+                        '''
+                    } else {
+                        sh '''
+                            export NVM_DIR="$HOME/.nvm"
+                            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+                            nvm use 20
+                            npm run build
+                        '''
+                    }
+                    
+                    echo '✅ Application construite avec succès'
+                }
             }
         }
         
@@ -128,11 +226,11 @@ pipeline {
             echo '🧹 Nettoyage...'
             sh '''
                 # Nettoyer les conteneurs de test
-                docker stop test-spray-info || true
-                docker rm test-spray-info || true
+                docker stop test-spray-info 2>/dev/null || true
+                docker rm test-spray-info 2>/dev/null || true
                 
                 # Nettoyer les images non utilisées
-                docker image prune -f || true
+                docker image prune -f 2>/dev/null || true
             '''
         }
         success {
@@ -142,8 +240,8 @@ pipeline {
             echo '❌ Le pipeline a échoué!'
             sh '''
                 # Afficher les logs en cas d'échec
-                docker logs test-spray-info || true
-                docker logs spray-info-app || true
+                docker logs test-spray-info 2>/dev/null || true
+                docker logs spray-info-app 2>/dev/null || true
             '''
         }
     }
