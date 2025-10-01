@@ -15,47 +15,42 @@ pipeline {
             }
         }
         
-        stage('Setup Node.js') {
-            steps {
-                echo '🔧 Configuration de Node.js...'
-                script {
-                    // Installer Node.js si nécessaire
-                    sh '''
-                        if ! command -v node &> /dev/null; then
-                            echo "Node.js n'est pas installé"
-                            exit 1
-                        fi
-                        node --version
-                        npm --version
-                    '''
+        stage('Install Dependencies') {
+            agent {
+                docker {
+                    image 'node:20-alpine'
+                    reuseNode true
                 }
             }
-        }
-        
-        stage('Install Dependencies') {
             steps {
                 echo '📥 Installation des dépendances...'
-                sh '''
-                    npm install
-                '''
+                sh 'npm ci --prefer-offline --no-audit'
             }
         }
         
         stage('Lint') {
+            agent {
+                docker {
+                    image 'node:20-alpine'
+                    reuseNode true
+                }
+            }
             steps {
                 echo '🔍 Vérification du code...'
-                sh '''
-                    npm run lint || echo "⚠️ Lint warnings trouvés"
-                '''
+                sh 'npm run lint || echo "⚠️ Lint warnings trouvés"'
             }
         }
         
         stage('Build Application') {
+            agent {
+                docker {
+                    image 'node:20-alpine'
+                    reuseNode true
+                }
+            }
             steps {
                 echo '🏗️ Construction de l\'application...'
-                sh '''
-                    npm run build
-                '''
+                sh 'npm run build'
             }
         }
         
