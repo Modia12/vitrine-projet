@@ -153,45 +153,93 @@ pipeline {
         }
         
         stage('Build Docker Image') {
+            when {
+                expression { env.DOCKER_AVAILABLE == 'true' }
+            }
             steps {
-                echo '🐳 Construction de l\'image Docker...'
                 script {
-                    sh """
-                        docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} .
-                        docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} ${DOCKER_IMAGE}:latest
-                    """
+                    echo '🐳 Construction de l\'image Docker...'
+                    
+                    try {
+                        sh """
+                            echo "📋 Vérification des fichiers nécessaires..."
+                            ls -la
+                            
+                            echo "🔨 Construction de l'image Docker..."
+                            docker build \
+                                --no-cache \
+                                --progress=plain \
+                                -t ${DOCKER_IMAGE}:${DOCKER_TAG} \
+                                -t ${DOCKER_IMAGE}:latest \
+                                . 2>&1 | tee docker-build.log
+                            
+                            echo "✅ Image Docker construite avec succès"
+                            docker images | grep ${DOCKER_IMAGE}
+                        """
+                    } catch (Exception e) {
+                        echo "❌ Erreur lors de la construction de l'image Docker"
+                        sh "cat docker-build.log || true"
+                        throw e
+                    }
                 }
             }
         }
         
         stage('Test Docker Image') {
+            when {
+                expression { env.DOCKER_AVAILABLE == 'true' }
+            }
             steps {
-                echo '🧪 Test de l\'image Docker...'
                 script {
-                    sh """
-                        # Arrêter et supprimer le conteneur s'il existe
-                        docker stop test-spray-info || true
-                        docker rm test-spray-info || true
-                        
-                        # Démarrer le conteneur de test
-                        docker run -d --name test-spray-info -p 3001:3000 ${DOCKER_IMAGE}:${DOCKER_TAG}
-                        
-                        # Attendre que l'application démarre
-                        echo "⏳ Attente du démarrage de l'application..."
-                        sleep 10
-                        
-                        # Vérifier les logs
-                        docker logs test-spray-info
-                        
-                        # Tester l'application
-                        curl -f http://localhost:3001 || (docker logs test-spray-info && exit 1)
-                        
-                        echo "✅ Test réussi!"
-                        
-                        # Nettoyer
-                        docker stop test-spray-info
-                        docker rm test-spray-info
-                    """
+                    echo '🧪 Test de l\'image Docker...'
+                    
+                    try {
+                        sh """
+                            echo "🧹 Nettoyage des conteneurs existants..."
+                            docker stop test-spray-info 2>/dev/null || true
+                            docker rm test-spray-info 2>/dev/null || true
+                            
+                            echo "🚀 Démarrage du conteneur de test..."
+                            docker run -d \
+                                --name test-spray-info \
+                                -p 3001:3000 \
+                                ${DOCKER_IMAGE}:${DOCKER_TAG}
+                            
+                            echo "⏳ Attente du démarrage (15 secondes)..."
+                            sleep 15
+                            
+                            echo "📋 Vérification des logs du conteneur..."
+                            docker logs test-spray-info
+                            
+                            echo "🔍 Test de l'application..."
+                            for i in 1 2 3 4 5; do
+                                if curl -f -s http://localhost:3001 > /dev/null; then
+                                    echo "✅ Application répond correctement!"
+                                    break
+                                else
+                                    echo "⏳ Tentative \$i/5..."
+                                    sleep 3
+                                fi
+                            done
+                            
+                            # Vérifier une dernière fois
+                            curl -f http://localhost:3001 || (
+                                echo "❌ L'application ne répond pas"
+                                docker logs test-spray-info
+                                exit 1
+                            )
+                            
+                            echo "🧹 Nettoyage du conteneur de test..."
+                            docker stop test-spray-info
+                            docker rm test-spray-info
+                        """
+                    } catch (Exception e) {
+                        echo "❌ Erreur lors du test de l'image Docker"
+                        sh "docker logs test-spray-info 2>/dev/null || true"
+                        sh "docker stop test-spray-info 2>/dev/null || true"
+                        sh "docker rm test-spray-info 2>/dev/null || true"
+                        throw e
+                    }
                 }
             }
         }
