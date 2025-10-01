@@ -1,50 +1,58 @@
 pipeline {
-    agent {
-        docker {
-            image 'node:20-alpine'
-            args '-u root:root'
-        }
-    }
+    agent any
     
     environment {
         DOCKER_IMAGE = 'spray-info'
         DOCKER_TAG = "${env.BUILD_NUMBER}"
-        DOCKER_REGISTRY = 'docker.io' // Utiliser Docker Hub par défaut
-        HOME = "${WORKSPACE}"
-        npm_config_cache = "${WORKSPACE}/.npm"
+        NODE_VERSION = '20'
     }
     
     stages {
         stage('Checkout') {
             steps {
-                echo 'Récupération du code source...'
+                echo '📦 Récupération du code source...'
                 checkout scm
+            }
+        }
+        
+        stage('Setup Node.js') {
+            steps {
+                echo '🔧 Configuration de Node.js...'
+                script {
+                    // Installer Node.js si nécessaire
+                    sh '''
+                        if ! command -v node &> /dev/null; then
+                            echo "Node.js n'est pas installé"
+                            exit 1
+                        fi
+                        node --version
+                        npm --version
+                    '''
+                }
             }
         }
         
         stage('Install Dependencies') {
             steps {
-                echo 'Installation des dépendances...'
+                echo '📥 Installation des dépendances...'
                 sh '''
-                    node --version
-                    npm --version
-                    npm ci --prefer-offline --no-audit
+                    npm install
                 '''
             }
         }
         
-        stage('Lint & Type Check') {
+        stage('Lint') {
             steps {
-                echo 'Vérification du code...'
+                echo '🔍 Vérification du code...'
                 sh '''
-                    npm run lint || echo "Lint warnings found"
+                    npm run lint || echo "⚠️ Lint warnings trouvés"
                 '''
             }
         }
         
         stage('Build Application') {
             steps {
-                echo 'Construction de l\'application...'
+                echo '🏗️ Construction de l\'application...'
                 sh '''
                     npm run build
                 '''
@@ -52,89 +60,68 @@ pipeline {
         }
         
         stage('Build Docker Image') {
-            agent any // Revenir à l'agent principal pour Docker
             steps {
-                echo 'Construction de l\'image Docker...'
-                script {
-                    dockerImage = docker.build("${DOCKER_IMAGE}:${DOCKER_TAG}")
-                    docker.build("${DOCKER_IMAGE}:latest")
-                }
-            }
-        }
-        
-        stage('Test Docker Image') {
-            agent any
-            steps {
-                echo 'Test de l\'image Docker...'
-                script {
-                    try {
-                        sh """
-                            docker run -d --name test-container-${BUILD_NUMBER} -p 300${BUILD_NUMBER}:3000 ${DOCKER_IMAGE}:${DOCKER_TAG}
-                            sleep 15
-                            docker logs test-container-${BUILD_NUMBER}
-                            curl -f http://localhost:300${BUILD_NUMBER} || exit 1
-                        """
-                    } finally {
-                        sh """
-                            docker stop test-container-${BUILD_NUMBER} || true
-                            docker rm test-container-${BUILD_NUMBER} || true
-                        """
-                    }
-                }
-            }
-        }
-        
-        stage('Push to Registry') {
-            agent any
-            when {
-                anyOf {
-                    branch 'main'
-                    branch 'master'
-                }
-            }
-            steps {
-                echo 'Publication de l\'image Docker...'
-                script {
-                    docker.withRegistry('https://registry.hub.docker.com', 'dockerhub-credentials') {
-                        dockerImage.push("${DOCKER_TAG}")
-                        dockerImage.push("latest")
-                    }
-                }
-            }
-        }
-        
-        stage('Deploy to Staging') {
-            when {
-                branch 'develop'
-            }
-            steps {
-                echo 'Déploiement en staging...'
+                echo '🐳 Construction de l\'image Docker...'
                 script {
                     sh """
-                        echo "Déploiement staging avec l'image ${DOCKER_IMAGE}:${DOCKER_TAG}"
-                        # docker-compose -f docker-compose.staging.yml up -d
+                        docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} .
+                        docker tag ${DOCKER_IMAGE}:${DOCKER_TAG} ${DOCKER_IMAGE}:latest
                     """
                 }
             }
         }
         
-        stage('Deploy to Production') {
-            when {
-                anyOf {
-                    branch 'main'
-                    branch 'master'
-                }
-            }
+        stage('Test Docker Image') {
             steps {
-                echo 'Déploiement en production...'
-                timeout(time: 5, unit: 'MINUTES') {
-                    input message: 'Déployer en production?', ok: 'Déployer'
-                }
+                echo '🧪 Test de l\'image Docker...'
                 script {
                     sh """
-                        echo "Déploiement production avec l'image ${DOCKER_IMAGE}:${DOCKER_TAG}"
-                        # docker-compose -f docker-compose.prod.yml up -d
-                        # ou kubectl set image deployment/spray-info spray-info=${DOCKER_IMAGE}:${DOCKER_TAG}
+                        # Arrêter et supprimer le conteneur s'il existe
+                        docker stop test-spray-info || true
+                        docker rm test-spray-info || true
+                        
+                        # Démarrer le conteneur de test
+                        docker run -d --name test-spray-info -p 3001:3000 ${DOCKER_IMAGE}:${DOCKER_TAG}
+                        
+                        # Attendre que l'application démarre
+                        echo "⏳ Attente du démarrage de l'application..."
+                        sleep 10
+                        
+                        # Vérifier les logs
+                        docker logs test-spray-info
+                        
+                        # Tester l'application
+                        curl -f http://localhost:3001 || (docker logs test-spray-info && exit 1)
+                        
+                        echo "✅ Test réussi!"
+                        
+                        # Nettoyer
+                        docker stop test-spray-info
+                        docker rm test-spray-info
+                    """
+                }
+            }
+        }
+        
+        stage('Deploy') {
+            steps {
+                echo '🚀 Déploiement...'
+                script {
+                    sh """
+                        echo "Déploiement de l'image ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                        
+                        # Arrêter l'ancien conteneur
+                        docker stop spray-info-app || true
+                        docker rm spray-info-app || true
+                        
+                        # Démarrer le nouveau conteneur
+                        docker run -d \
+                            --name spray-info-app \
+                            -p 3000:3000 \
+                            --restart unless-stopped \
+                            ${DOCKER_IMAGE}:${DOCKER_TAG}
+                        
+                        echo "✅ Application déployée sur http://localhost:3000"
                     """
                 }
             }
@@ -143,20 +130,26 @@ pipeline {
     
     post {
         always {
-            echo 'Nettoyage...'
+            echo '🧹 Nettoyage...'
             sh '''
-                docker system prune -f || true
+                # Nettoyer les conteneurs de test
+                docker stop test-spray-info || true
+                docker rm test-spray-info || true
+                
+                # Nettoyer les images non utilisées
+                docker image prune -f || true
             '''
-            cleanWs()
         }
         success {
-            echo 'Pipeline exécuté avec succès!'
+            echo '✅ Pipeline exécuté avec succès!'
         }
         failure {
-            echo 'Le pipeline a échoué!'
-            // emailext subject: "Build Failed: ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
-            //          body: "Le build a échoué. Voir: ${env.BUILD_URL}",
-            //          to: "team@example.com"
+            echo '❌ Le pipeline a échoué!'
+            sh '''
+                # Afficher les logs en cas d'échec
+                docker logs test-spray-info || true
+                docker logs spray-info-app || true
+            '''
         }
     }
 }
