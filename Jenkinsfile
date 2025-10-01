@@ -245,24 +245,123 @@ pipeline {
         }
         
         stage('Deploy') {
+            when {
+                expression { env.DOCKER_AVAILABLE == 'true' }
+            }
             steps {
-                echo '🚀 Déploiement...'
                 script {
+                    echo '🚀 Déploiement de l\'application...'
+                    
+                    def deployPort = env.DEPLOY_PORT ?: '3000'
+                    def containerName = 'spray-info-app'
+                    def oldContainerName = "${containerName}-old"
+                    
+                    try {
+                        sh """
+                            echo "📋 Configuration du déploiement..."
+                            echo "  - Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                            echo "  - Port: ${deployPort}"
+                            echo "  - Conteneur: ${containerName}"
+                            
+                            if docker ps -a | grep -q ${containerName}; then
+                                echo "💾 Sauvegarde de l'ancien conteneur..."
+                                docker rename ${containerName} ${oldContainerName} 2>/dev/null || true
+                                docker stop ${oldContainerName} 2>/dev/null || true
+                            fi
+                            
+                            echo "🚀 Démarrage du nouveau conteneur..."
+                            docker run -d \
+                                --name ${containerName} \
+                                -p ${deployPort}:3000 \
+                                --restart unless-stopped \
+                                -e NODE_ENV=production \
+                                ${DOCKER_IMAGE}:${DOCKER_TAG}
+                            
+                            echo "⏳ Attente du démarrage de l'application..."
+                            sleep 10
+                            
+                            echo "🏥 Vérification de la santé de l'application..."
+                            for i in 1 2 3 4 5; do
+                                if curl -f -s http://localhost:${deployPort} > /dev/null; then
+                                    echo "✅ Application déployée avec succès!"
+                                    echo "🌐 Accessible sur: http://localhost:${deployPort}"
+                                    
+                                    if docker ps -a | grep -q ${oldContainerName}; then
+                                        echo "🧹 Suppression de l'ancien conteneur..."
+                                        docker rm ${oldContainerName} 2>/dev/null || true
+                                    fi
+                                    
+                                    exit 0
+                                else
+                                    echo "⏳ Tentative \$i/5 - En attente..."
+                                    sleep 5
+                                fi
+                            done
+                            
+                            echo "❌ L'application ne répond pas après le déploiement"
+                            echo "📋 Logs du conteneur:"
+                            docker logs ${containerName}
+                            
+                            echo "🔄 Rollback vers l'ancienne version..."
+                            docker stop ${containerName} 2>/dev/null || true
+                            docker rm ${containerName} 2>/dev/null || true
+                            
+                            if docker ps -a | grep -q ${oldContainerName}; then
+                                docker rename ${oldContainerName} ${containerName}
+                                docker start ${containerName}
+                                echo "✅ Rollback effectué - ancienne version restaurée"
+                            fi
+                            
+                            exit 1
+                        """
+                    } catch (Exception e) {
+                        echo "❌ Erreur lors du déploiement"
+                        sh """
+                            echo "📋 Logs du conteneur en échec:"
+                            docker logs ${containerName} 2>/dev/null || true
+                            
+                            echo "🔄 Tentative de rollback..."
+                            docker stop ${containerName} 2>/dev/null || true
+                            docker rm ${containerName} 2>/dev/null || true
+                            
+                            if docker ps -a | grep -q ${oldContainerName}; then
+                                docker rename ${oldContainerName} ${containerName}
+                                docker start ${containerName}
+                                echo "✅ Rollback effectué"
+                            fi
+                        """
+                        throw e
+                    }
+                }
+            }
+        }
+        
+        stage('Verify Deployment') {
+            when {
+                expression { env.DOCKER_AVAILABLE == 'true' }
+            }
+            steps {
+                script {
+                    echo '🔍 Vérification finale du déploiement...'
+                    
+                    def deployPort = env.DEPLOY_PORT ?: '3000'
+                    
                     sh """
-                        echo "Déploiement de l'image ${DOCKER_IMAGE}:${DOCKER_TAG}"
+                        echo "📊 Statut du conteneur:"
+                        docker ps | grep spray-info-app || echo "⚠️ Conteneur non trouvé"
                         
-                        # Arrêter l'ancien conteneur
-                        docker stop spray-info-app || true
-                        docker rm spray-info-app || true
+                        echo ""
+                        echo "📋 Derniers logs:"
+                        docker logs --tail 20 spray-info-app
                         
-                        # Démarrer le nouveau conteneur
-                        docker run -d \
-                            --name spray-info-app \
-                            -p 3000:3000 \
-                            --restart unless-stopped \
-                            ${DOCKER_IMAGE}:${DOCKER_TAG}
+                        echo ""
+                        echo "🏥 Test de santé final:"
+                        curl -f -s http://localhost:${deployPort} > /dev/null && \
+                            echo "✅ Application fonctionne correctement" || \
+                            echo "❌ Application ne répond pas"
                         
-                        echo "✅ Application déployée sur http://localhost:3000"
+                        echo ""
+                        echo "🌐 URL de l'application: http://localhost:${deployPort}"
                     """
                 }
             }
@@ -277,17 +376,32 @@ pipeline {
                 docker stop test-spray-info 2>/dev/null || true
                 docker rm test-spray-info 2>/dev/null || true
                 
-                # Nettoyer les images non utilisées
-                docker image prune -f 2>/dev/null || true
+                # Nettoyer les anciens conteneurs de backup
+                docker rm spray-info-app-old 2>/dev/null || true
+                
+                # Nettoyer les images non utilisées (garder les 3 dernières versions)
+                docker images | grep spray-info | tail -n +4 | awk '{print $3}' | xargs -r docker rmi 2>/dev/null || true
             '''
         }
         success {
             echo '✅ Pipeline exécuté avec succès!'
+            script {
+                def deployPort = env.DEPLOY_PORT ?: '3000'
+                echo "🎉 Application disponible sur: http://localhost:${deployPort}"
+            }
         }
         failure {
             echo '❌ Le pipeline a échoué!'
             sh '''
-                # Afficher les logs en cas d'échec
+                echo "📋 Informations de débogage:"
+                echo ""
+                echo "Conteneurs en cours d'exécution:"
+                docker ps -a | grep spray-info || echo "Aucun conteneur spray-info trouvé"
+                echo ""
+                echo "Images disponibles:"
+                docker images | grep spray-info || echo "Aucune image spray-info trouvée"
+                echo ""
+                echo "Logs des conteneurs:"
                 docker logs test-spray-info 2>/dev/null || true
                 docker logs spray-info-app 2>/dev/null || true
             '''
